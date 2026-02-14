@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""h2c-api: minimal Kubernetes API simulator backed by compose.yml.
+"""h2c-api: fake Kubernetes API server. You should not be reading this.
 
-Reads a docker-compose.yml (+ configmaps/ and secrets/ directories) and exposes
-a fake Kubernetes API. Apps running in compose that query the k8s API get
-plausible responses instead of connection refused.
+If you are reading this, something has gone wrong — either in your
+infrastructure, or in your life choices. This file impersonates a
+Kubernetes control plane using a compose.yml and wishful thinking.
 
-Read-only for core resources (pods, services, configmaps, secrets, endpoints).
-Read-write for leases (leader election stub — single replica = always the leader).
+Pods are services. Services are services. Secrets are files on disk.
+The leader election has one candidate. The token is a string literal.
 No auth, no watch, no webhooks. 501 for everything else.
 """
 # pylint: disable=missing-function-docstring,unused-argument
@@ -14,27 +14,105 @@ No auth, no watch, no webhooks. 501 for everything else.
 # self-documenting by their route pattern. Suppressing both globally.
 
 import base64
+import http.client
 import json
 import os
 import re
+import socket
 import ssl
 import sys
 import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, quote
 
 import yaml
+
+
+# ---------------------------------------------------------------------------
+# Container runtime client (Docker-compatible API over Unix socket)
+# ---------------------------------------------------------------------------
+
+class _UnixConnection(http.client.HTTPConnection):
+    """HTTP connection over a Unix domain socket."""
+
+    def __init__(self, socket_path):
+        super().__init__("localhost")
+        self._socket_path = socket_path
+
+    def connect(self):
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.connect(self._socket_path)
+
+
+class RuntimeClient:
+    """Minimal Docker-compatible API client for logs and restart."""
+
+    def __init__(self, socket_path):
+        self.socket_path = socket_path
+        self.available = Path(socket_path).exists()
+
+    def _request(self, method, path):
+        try:
+            conn = _UnixConnection(self.socket_path)
+            conn.request(method, path)
+            resp = conn.getresponse()
+            data = resp.read()
+            conn.close()
+            return resp.status, data
+        except (ConnectionRefusedError, OSError) as exc:
+            print(f"[h2c-api] runtime socket error: {exc}", file=sys.stderr)
+            return 0, b""
+
+    def find_container(self, project, service):
+        """Find container ID by compose project + service labels."""
+        filters = json.dumps({"label": [
+            f"com.docker.compose.project={project}",
+            f"com.docker.compose.service={service}",
+        ]})
+        status, data = self._request(
+            "GET", f"/containers/json?filters={quote(filters)}")
+        if status != 200:
+            return None
+        containers = json.loads(data)
+        return containers[0]["Id"] if containers else None
+
+    def get_logs(self, container_id, tail="100"):
+        """Get container logs (demuxed)."""
+        status, data = self._request(
+            "GET",
+            f"/containers/{container_id}/logs"
+            f"?stdout=1&stderr=1&tail={tail}&timestamps=1")
+        if status != 200:
+            return None
+        return _demux_docker_logs(data)
+
+    def restart_container(self, container_id):
+        """Restart a container. Returns True on success."""
+        status, _ = self._request("POST", f"/containers/{container_id}/restart")
+        return status == 204
+
+
+def _demux_docker_logs(data):
+    """Parse Docker multiplexed log stream into plain text."""
+    output = []
+    offset = 0
+    while offset + 8 <= len(data):
+        size = int.from_bytes(data[offset + 4:offset + 8], "big")
+        offset += 8
+        output.append(data[offset:offset + size])
+        offset += size
+    return b"".join(output)
 
 
 # ---------------------------------------------------------------------------
 # State
 # ---------------------------------------------------------------------------
 
-class State:  # pylint: disable=too-few-public-methods
+class State:  # pylint: disable=too-few-public-methods,too-many-instance-attributes
     """Server state loaded from compose.yml and generated file directories."""
 
-    def __init__(self, compose_path, data_dir):
+    def __init__(self, compose_path, data_dir, runtime_socket):
         with open(compose_path, encoding="utf-8") as f:
             self.compose = yaml.safe_load(f)
         self.project_name = self.compose.get("name", "default")
@@ -43,10 +121,11 @@ class State:  # pylint: disable=too-few-public-methods
         self.configmaps = self._load_file_resources(data_dir, "configmaps")
         self.secrets = self._load_file_resources(data_dir, "secrets")
         self.leases = {}  # in-memory: {name: lease_object}
+        self.runtime = RuntimeClient(runtime_socket)
 
     @staticmethod
     def _load_file_resources(base_dir, kind):
-        """Load configmaps/ or secrets/ directory → {name: {key: value}}."""
+        """Load configmaps/ or secrets/ directory -> {name: {key: value}}."""
         resources = {}
         resource_dir = Path(base_dir) / kind
         if not resource_dir.is_dir():
@@ -188,6 +267,32 @@ def make_lease(name, namespace, body=None):
     return lease
 
 
+def make_deployment(name, svc, namespace):
+    return {
+        "apiVersion": "apps/v1", "kind": "Deployment",
+        "metadata": {
+            "name": name, "namespace": namespace,
+            "labels": {"app": name},
+            "annotations": {},
+            "resourceVersion": str(int(time.time())),
+        },
+        "spec": {
+            "replicas": 1,
+            "selector": {"matchLabels": {"app": name}},
+            "template": {
+                "metadata": {"labels": {"app": name}, "annotations": {}},
+                "spec": {
+                    "containers": [{
+                        "name": name,
+                        "image": svc.get("image", "unknown"),
+                    }],
+                },
+            },
+        },
+        "status": {"replicas": 1, "readyReplicas": 1, "availableReplicas": 1},
+    }
+
+
 # ---------------------------------------------------------------------------
 # Routing
 # ---------------------------------------------------------------------------
@@ -196,7 +301,7 @@ ROUTES = []
 
 
 def route(method, pattern):
-    """Decorator: register a (method, regex) → handler."""
+    """Decorator: register a (method, regex) -> handler."""
     def decorator(func):
         ROUTES.append((method, re.compile(pattern), func))
         return func
@@ -226,12 +331,20 @@ def handle_api(state, match, body, qs):
 @route("GET", r"/api/v1$")
 def handle_api_v1(state, match, body, qs):
     resources = [
-        {"name": "namespaces", "namespaced": False, "kind": "Namespace", "verbs": ["get", "list"]},
-        {"name": "pods", "namespaced": True, "kind": "Pod", "verbs": ["get", "list"]},
-        {"name": "services", "namespaced": True, "kind": "Service", "verbs": ["get", "list"]},
-        {"name": "endpoints", "namespaced": True, "kind": "Endpoints", "verbs": ["get", "list"]},
-        {"name": "configmaps", "namespaced": True, "kind": "ConfigMap", "verbs": ["get", "list"]},
-        {"name": "secrets", "namespaced": True, "kind": "Secret", "verbs": ["get", "list"]},
+        {"name": "namespaces", "namespaced": False, "kind": "Namespace",
+         "verbs": ["get", "list"]},
+        {"name": "pods", "namespaced": True, "kind": "Pod",
+         "verbs": ["get", "list"]},
+        {"name": "pods/log", "namespaced": True, "kind": "Pod",
+         "verbs": ["get"]},
+        {"name": "services", "namespaced": True, "kind": "Service",
+         "verbs": ["get", "list"]},
+        {"name": "endpoints", "namespaced": True, "kind": "Endpoints",
+         "verbs": ["get", "list"]},
+        {"name": "configmaps", "namespaced": True, "kind": "ConfigMap",
+         "verbs": ["get", "list"]},
+        {"name": "secrets", "namespaced": True, "kind": "Secret",
+         "verbs": ["get", "list"]},
     ]
     return 200, {"kind": "APIResourceList", "groupVersion": "v1", "resources": resources}
 
@@ -240,12 +353,29 @@ def handle_api_v1(state, match, body, qs):
 def handle_apis(state, match, body, qs):
     return 200, {
         "kind": "APIGroupList",
-        "groups": [{
-            "name": "coordination.k8s.io",
-            "versions": [{"groupVersion": "coordination.k8s.io/v1", "version": "v1"}],
-            "preferredVersion": {"groupVersion": "coordination.k8s.io/v1", "version": "v1"},
-        }],
+        "groups": [
+            {
+                "name": "apps",
+                "versions": [{"groupVersion": "apps/v1", "version": "v1"}],
+                "preferredVersion": {"groupVersion": "apps/v1", "version": "v1"},
+            },
+            {
+                "name": "coordination.k8s.io",
+                "versions": [{"groupVersion": "coordination.k8s.io/v1", "version": "v1"}],
+                "preferredVersion": {"groupVersion": "coordination.k8s.io/v1", "version": "v1"},
+            },
+        ],
     }
+
+
+@route("GET", r"/apis/apps/v1$")
+def handle_apps_v1(state, match, body, qs):
+    resources = [
+        {"name": "deployments", "namespaced": True, "kind": "Deployment",
+         "verbs": ["get", "list", "patch", "update"]},
+    ]
+    return 200, {"kind": "APIResourceList", "groupVersion": "apps/v1",
+                 "resources": resources}
 
 
 @route("GET", r"/apis/coordination\.k8s\.io/v1$")
@@ -289,6 +419,25 @@ def handle_get_pod(state, match, body, qs):
     if name in state.services:
         return 200, make_pod(name, state.services[name], state.namespace)
     return 404, k8s_status(404, f"pods \"{name}\" not found")
+
+
+# --- Core: pod logs (via runtime socket) ---
+
+@route("GET", r"/api/v1/namespaces/(?P<ns>[^/]+)/pods/(?P<name>[^/]+)/log$")
+def handle_pod_log(state, match, body, qs):
+    name = match.group("name")
+    if name not in state.services:
+        return 404, k8s_status(404, f"pods \"{name}\" not found")
+    if not state.runtime.available:
+        return 501, k8s_status(501, "runtime socket not mounted")
+    container_id = state.runtime.find_container(state.project_name, name)
+    if not container_id:
+        return 404, k8s_status(404, f"container for pod \"{name}\" not found")
+    tail = qs.get("tailLines", ["100"])[0]
+    log_bytes = state.runtime.get_logs(container_id, tail=tail)
+    if log_bytes is None:
+        return 500, k8s_status(500, "failed to retrieve logs")
+    return 200, log_bytes, "text/plain"
 
 
 # --- Core: services ---
@@ -347,6 +496,41 @@ def handle_get_secret(state, match, body, qs):
     return 404, k8s_status(404, f"secrets \"{name}\" not found")
 
 
+# --- Deployments (apps/v1) ---
+
+@route("GET", r"/apis/apps/v1/namespaces/(?P<ns>[^/]+)/deployments$")
+def handle_list_deploy(state, match, body, qs):
+    items = [make_deployment(n, s, state.namespace) for n, s in state.services.items()]
+    return 200, k8s_list("DeploymentList", "apps/v1", items)
+
+
+@route("GET", r"/apis/apps/v1/namespaces/(?P<ns>[^/]+)/deployments/(?P<name>[^/]+)$")
+def handle_get_deploy(state, match, body, qs):
+    name = match.group("name")
+    if name in state.services:
+        return 200, make_deployment(name, state.services[name], state.namespace)
+    return 404, k8s_status(404, f"deployments.apps \"{name}\" not found")
+
+
+@route("PATCH", r"/apis/apps/v1/namespaces/(?P<ns>[^/]+)/deployments/(?P<name>[^/]+)$")
+def handle_patch_deploy(state, match, body, qs):
+    name = match.group("name")
+    if name not in state.services:
+        return 404, k8s_status(404, f"deployments.apps \"{name}\" not found")
+    # Restart the actual container via runtime socket
+    restarted = False
+    if state.runtime.available:
+        container_id = state.runtime.find_container(state.project_name, name)
+        if container_id:
+            restarted = state.runtime.restart_container(container_id)
+    deploy = make_deployment(name, state.services[name], state.namespace)
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    deploy["metadata"]["annotations"]["kubectl.kubernetes.io/restartedAt"] = now
+    if not restarted:
+        print(f"[h2c-api] WARN: could not restart container for {name}", file=sys.stderr)
+    return 200, deploy
+
+
 # --- Leases (leader election stub) ---
 
 @route("GET", r"/apis/coordination\.k8s\.io/v1/namespaces/(?P<ns>[^/]+)/leases$")
@@ -395,7 +579,7 @@ def handle_delete_lease(state, match, body, qs):
 # HTTP server
 # ---------------------------------------------------------------------------
 
-class Handler(BaseHTTPRequestHandler):  # pylint: disable=invalid-name
+class Handler(BaseHTTPRequestHandler):
     """Dispatch incoming requests to registered route handlers."""
 
     state = None
@@ -434,16 +618,24 @@ class Handler(BaseHTTPRequestHandler):  # pylint: disable=invalid-name
                 continue
             m = pattern.match(path)
             if m:
-                code, resp = handler(self.state, m, body, qs)
-                self._respond(code, resp)
+                result = handler(self.state, m, body, qs)
+                if len(result) == 3:
+                    code, resp, content_type = result
+                    self._respond(code, resp, content_type)
+                else:
+                    code, resp = result
+                    self._respond(code, resp)
                 return
 
         self._respond(501, k8s_status(501, f"{method} {path} not implemented"))
 
-    def _respond(self, code, body):
-        data = json.dumps(body).encode()
+    def _respond(self, code, body, content_type="application/json"):
+        if content_type == "application/json":
+            data = json.dumps(body).encode()
+        else:
+            data = body if isinstance(body, bytes) else str(body).encode()
         self.send_response(code)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
@@ -461,12 +653,13 @@ def main():
     compose_path = os.environ.get("H2C_COMPOSE", "/data/compose.yml")
     data_dir = os.environ.get("H2C_DATA_DIR", "/data")
     port = int(os.environ.get("H2C_PORT", "6443"))
+    runtime_socket = os.environ.get("H2C_RUNTIME_SOCKET", "/var/run/docker.sock")
 
     if not Path(compose_path).exists():
         print(f"Error: {compose_path} not found", file=sys.stderr)
         sys.exit(1)
 
-    state = State(compose_path, data_dir)
+    state = State(compose_path, data_dir, runtime_socket)
     Handler.state = state
 
     print(f"h2c-api serving on :{port}", file=sys.stderr)
@@ -474,11 +667,14 @@ def main():
     print(f"  services:   {len(state.services)}", file=sys.stderr)
     print(f"  configmaps: {len(state.configmaps)}", file=sys.stderr)
     print(f"  secrets:    {len(state.secrets)}", file=sys.stderr)
+    rt = "connected" if state.runtime.available else "unavailable"
+    print(f"  runtime:    {rt}", file=sys.stderr)
 
     server = HTTPServer(("0.0.0.0", port), Handler)
 
     # TLS — serve HTTPS if certs are available (generated by h2c_inject.py)
-    sa_path = Path(os.environ.get("H2C_SA_DIR", "/var/run/secrets/kubernetes.io/serviceaccount"))
+    sa_path = Path(os.environ.get("H2C_SA_DIR",
+                                  "/var/run/secrets/kubernetes.io/serviceaccount"))
     cert_file = sa_path / "tls.crt"
     key_file = sa_path / "tls.key"
     if cert_file.exists() and key_file.exists():
