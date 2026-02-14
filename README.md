@@ -61,8 +61,6 @@ docker exec <container> kubectl get namespaces
 python3 h2c_inject.py compose.yml --expose-host-port 16443 --host myserver.example.com
 ```
 
-**Note:** Certs are cached in `h2c-sa/`. Delete the directory to regenerate if you change `--host`.
-
 `kubectl version` will report `Server Version: v1.28.0-h2c`. If this doesn't raise alarms, the deception is complete.
 
 ### Remote access

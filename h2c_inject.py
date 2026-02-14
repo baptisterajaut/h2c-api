@@ -32,24 +32,20 @@ def generate_sa(sa_dir, namespace, extra_hosts=None):
     """Generate self-signed cert, dummy token, namespace file."""
     sa_dir.mkdir(exist_ok=True)
 
-    if not (sa_dir / "tls.crt").exists():
-        san = ("DNS:h2c-api,DNS:kubernetes,DNS:kubernetes.default,"
-               "DNS:kubernetes.default.svc,DNS:localhost,IP:127.0.0.1")
-        for host in (extra_hosts or []):
-            san += f",DNS:{host}"
-        subprocess.run([
-            "openssl", "req", "-x509", "-newkey", "rsa:2048",
-            "-keyout", str(sa_dir / "tls.key"),
-            "-out", str(sa_dir / "tls.crt"),
-            "-days", "3650", "-nodes",
-            "-subj", "/CN=h2c-api",
-            "-addext", f"subjectAltName={san}",
-        ], check=True, capture_output=True)
-        # self-signed: ca.crt = tls.crt
-        (sa_dir / "ca.crt").write_bytes((sa_dir / "tls.crt").read_bytes())
-        print("  certs: generated", file=sys.stderr)
-    else:
-        print("  certs: reusing existing", file=sys.stderr)
+    san = ("DNS:h2c-api,DNS:kubernetes,DNS:kubernetes.default,"
+           "DNS:kubernetes.default.svc,DNS:localhost,IP:127.0.0.1")
+    for host in (extra_hosts or []):
+        san += f",DNS:{host}"
+    subprocess.run([
+        "openssl", "req", "-x509", "-newkey", "rsa:2048",
+        "-keyout", str(sa_dir / "tls.key"),
+        "-out", str(sa_dir / "tls.crt"),
+        "-days", "3650", "-nodes",
+        "-subj", "/CN=h2c-api",
+        "-addext", f"subjectAltName={san}",
+    ], check=True, capture_output=True)
+    # self-signed: ca.crt = tls.crt
+    (sa_dir / "ca.crt").write_bytes((sa_dir / "tls.crt").read_bytes())
 
     (sa_dir / "token").write_text("h2c-api-dummy-token", encoding="utf-8")
     (sa_dir / "namespace").write_text(namespace, encoding="utf-8")
@@ -158,6 +154,9 @@ def main():
     if extra_hosts:
         print(f"  extra SAN hosts: {', '.join(extra_hosts)}", file=sys.stderr)
     print(f"  namespace: {project_name}", file=sys.stderr)
+    print(f"\n  Remember to .gitignore: {SA_DIR}/ compose.override.yml"
+          "\n  Also consider a fake identity. Failing to do so may greet"
+          " you with consequences.", file=sys.stderr)
 
 
 if __name__ == "__main__":
