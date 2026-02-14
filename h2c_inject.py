@@ -7,7 +7,7 @@ If you're running this, you've already made your choice. We're not
 here to judge. We're here to generate certificates.
 
 Usage:
-    python3 h2c_inject.py [compose.yml] [--port N] [--host HOSTNAME]
+    python3 h2c_inject.py [compose.yml] [--expose-host-port [N]] [--host HOSTNAME]
 """
 
 import subprocess
@@ -74,15 +74,18 @@ def find_runtime_socket():
 
 def main():
     """Read compose.yml, generate SA certs, write compose.override.yml."""
-    # Parse args: [compose.yml] [--port N] [--host HOSTNAME]
+    # Parse args: [compose.yml] [--expose-host-port [N]] [--host HOSTNAME]
     args = sys.argv[1:]
-    host_port = "6443"
+    host_port = None
     extra_hosts = []
     compose_file = "compose.yml"
     while args:
-        if args[0] == "--port" and len(args) > 1:
-            host_port = args[1]
-            args = args[2:]
+        if args[0] == "--expose-host-port":
+            host_port = "6443"
+            if len(args) > 1 and args[1].isdigit():
+                host_port = args[1]
+                args = args[1:]
+            args = args[1:]
         elif args[0] == "--host" and len(args) > 1:
             extra_hosts.append(args[1])
             args = args[2:]
@@ -119,12 +122,14 @@ def main():
     if runtime_socket:
         h2c_volumes.append(f"{runtime_socket}:/var/run/docker.sock")
 
-    override_services["h2c-api"] = {
+    h2c_service = {
         "image": "docker.io/baptisterajaut/h2c-api:latest",
         "restart": "unless-stopped",
-        "ports": [f"{host_port}:6443"],
         "volumes": h2c_volumes,
     }
+    if host_port:
+        h2c_service["ports"] = [f"{host_port}:6443"]
+    override_services["h2c-api"] = h2c_service
 
     # Inject SA mount + env into every existing service
     for svc_name in services:
@@ -148,7 +153,8 @@ def main():
     print(f"  SA mount: ./{SA_DIR}/ -> {SA_MOUNT}", file=sys.stderr)
     rt = runtime_socket or "not found (logs/restart disabled)"
     print(f"  runtime socket: {rt}", file=sys.stderr)
-    print(f"  port: {host_port}:6443 on host", file=sys.stderr)
+    port_info = f"{host_port}:6443 on host" if host_port else "not exposed"
+    print(f"  port: {port_info}", file=sys.stderr)
     if extra_hosts:
         print(f"  extra SAN hosts: {', '.join(extra_hosts)}", file=sys.stderr)
     print(f"  namespace: {project_name}", file=sys.stderr)

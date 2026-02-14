@@ -53,12 +53,12 @@ docker exec <container> kubectl get namespaces
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--port N` | `6443` | Host port for the fake API |
+| `--expose-host-port [N]` | — | Expose on host (default 6443 if no value given) |
 | `--host HOSTNAME` | — | Extra hostname in TLS cert SAN (repeatable) |
 
 ```bash
-# Custom port + external hostname
-python3 h2c_inject.py compose.yml --port 16443 --host myserver.example.com
+# Expose on host with custom port + external hostname
+python3 h2c_inject.py compose.yml --expose-host-port 16443 --host myserver.example.com
 ```
 
 **Note:** Certs are cached in `h2c-sa/`. Delete the directory to regenerate if you change `--host`.
