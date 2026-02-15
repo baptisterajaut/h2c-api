@@ -65,18 +65,25 @@ python3 h2c_inject.py compose.yml --expose-host-port 16443 --host myserver.examp
 
 ### Remote access
 
-h2c-api exposes port 6443 (or `--port`) on the host. You can run `kubectl` from outside compose:
+When `--expose-host-port` is used, h2c-inject generates a self-contained kubeconfig file next to the compose override:
 
 ```bash
-kubectl --server=https://localhost:16443 \
-        --certificate-authority=h2c-sa/ca.crt \
-        --token=h2c-api-dummy-token \
-        get pods
+python3 h2c_inject.py compose.yml --expose-host-port 16443
+# -> kubeconfig-localhost.conf
+
+KUBECONFIG=kubeconfig-localhost.conf kubectl get pods
 ```
 
-For access from another machine, use `--host` to add the server hostname to the TLS certificate, then replace `localhost` with the actual hostname.
+For access from another machine, use `--host` to add the server hostname to the TLS certificate — the kubeconfig will use that hostname:
 
-Exposing this on a real server is the international law equivalent of leaving your front door open with a sign that says "free crimes." The TLS cert is self-signed, the token is a string literal, and there is no authentication. You have been warned. We accept no liability, and neither will your lawyer.
+```bash
+python3 h2c_inject.py compose.yml --expose-host-port 16443 --host myserver.example.com
+# -> kubeconfig-myserver.example.com.conf
+
+KUBECONFIG=kubeconfig-myserver.example.com.conf kubectl get pods
+```
+
+Exposing this on a real server is the international law equivalent of handing out loaded weapons at a school fair. The TLS cert is self-signed, the token is a string literal, and there is no authentication. For the record, we only provided the kubeconfig — we had no knowledge of the user's intentions and assume all usage is for legitimate, peaceful purposes. We accept no liability, and neither will your lawyer.
 
 ## Supported endpoints
 
