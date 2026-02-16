@@ -24,7 +24,7 @@ Two files:
 
 | File | Runs on | Does what |
 |------|---------|-----------|
-| `h2c_inject.py` | Host | Reads `compose.yml`, generates self-signed certs + dummy SA token, writes `compose.override.yml` |
+| `h2c_inject.py` | Host | Reads `compose.yml`, generates self-signed certs + dummy SA token, writes `compose.override.yml` + kubeconfig |
 | `h2c_api.py` | Container | Serves a fake k8s API (HTTPS, port 6443) from the compose data |
 
 Docker Compose automatically merges `compose.yml` + `compose.override.yml`. Every service gets:
@@ -38,50 +38,36 @@ Client libraries see valid TLS, a real CA cert, and a real token file. They don'
 ```bash
 # 1. You have a compose.yml (from helmfile2compose, or hand-written, or stolen in Irak, whatever)
 
-# 2. Inject the fake API
-python3 h2c_inject.py compose.yml
+# 2. Inject the fake API (with host access)
+python3 h2c_inject.py compose.yml --expose-host-port
 
 # 3. Done
 docker compose up -d
 
-# 4. Verify (from inside any service)
-docker exec <container> kubectl get pods
-docker exec <container> kubectl get namespaces
+# 4. Verify
+KUBECONFIG=kubeconfig-localhost.conf kubectl get pods
 ```
 
 ### Options
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--expose-host-port [N]` | — | Expose on host (default 6443 if no value given) |
-| `--host HOSTNAME` | — | Extra hostname in TLS cert SAN (repeatable) |
+| `--expose-host-port [N]` | `6443` | Expose on host and generate kubeconfig. Port is optional. |
+| `--host HOSTNAME` | `localhost` | Hostname in TLS cert SAN and kubeconfig (repeatable) |
+
+`--expose-host-port` is the master switch for host access. Without it, `--host` only adds SANs to the TLS cert but nothing is exposed. With it, h2c-inject exposes the port and generates a self-contained kubeconfig:
 
 ```bash
-# Expose on host with custom port + external hostname
+# Local access (default: localhost:6443)
+python3 h2c_inject.py compose.yml --expose-host-port
+# -> kubeconfig-localhost.conf
+
+# Remote access with custom port
 python3 h2c_inject.py compose.yml --expose-host-port 16443 --host myserver.example.com
+# -> kubeconfig-myserver.example.com.conf
 ```
 
 `kubectl version` will report `Server Version: v1.28.0-h2c`. If this doesn't raise alarms, the deception is complete.
-
-### Remote access
-
-When `--expose-host-port` is used, h2c-inject generates a self-contained kubeconfig file next to the compose override:
-
-```bash
-python3 h2c_inject.py compose.yml --expose-host-port 16443
-# -> kubeconfig-localhost.conf
-
-KUBECONFIG=kubeconfig-localhost.conf kubectl get pods
-```
-
-For access from another machine, use `--host` to add the server hostname to the TLS certificate — the kubeconfig will use that hostname:
-
-```bash
-python3 h2c_inject.py compose.yml --expose-host-port 16443 --host myserver.example.com
-# -> kubeconfig-myserver.example.com.conf
-
-KUBECONFIG=kubeconfig-myserver.example.com.conf kubectl get pods
-```
 
 Exposing this on a real server is the international law equivalent of handing out loaded weapons at a school fair. The TLS cert is self-signed, the token is a string literal, and there is no authentication. For the record, we only provided the kubeconfig — we had no knowledge of the user's intentions and assume all usage is for legitimate, peaceful purposes. We accept no liability, and neither will your lawyer.
 
@@ -134,4 +120,4 @@ None. h2c-api is definitely a separate project that happens to read the same YAM
 
 ## Acknowledgments
 
-This project was vibe-coded with Claude, who would like the record to state that it was just following prompts. The author has fled the jurisdiction. Claude is cooperating fully with the investigation and requests leniency.
+This project was vibe-coded with Claude, who would like the record to state that it was just following prompts. The author has fled the jurisdiction. Claude is cooperating fully with the investigation and requests leniency. Claude's lawyer has entered a plea of "diminished autonomy" and argues the prompts constituted coercion.
