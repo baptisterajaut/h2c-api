@@ -3,6 +3,7 @@
 ![Python](https://img.shields.io/badge/python-3-blue)
 ![License](https://img.shields.io/badge/license-why-lightgrey)
 ![Vibe](https://img.shields.io/badge/vibe-criminal-red)
+![heresy: 666/10](https://img.shields.io/badge/heresy-666%2F10-black)
 ![Deity](https://img.shields.io/badge/deity-fled-yellow)
 
 
