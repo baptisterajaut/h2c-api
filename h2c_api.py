@@ -433,7 +433,10 @@ def handle_pod_log(state, match, body, qs):
     container_id = state.runtime.find_container(state.project_name, name)
     if not container_id:
         return 404, k8s_status(404, f"container for pod \"{name}\" not found")
-    tail = qs.get("tailLines", ["100"])[0]
+    try:
+        tail = int(qs.get("tailLines", ["100"])[0])
+    except (ValueError, IndexError):
+        tail = 100
     log_bytes = state.runtime.get_logs(container_id, tail=tail)
     if log_bytes is None:
         return 500, k8s_status(500, "failed to retrieve logs")

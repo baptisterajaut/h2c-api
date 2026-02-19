@@ -61,8 +61,12 @@ def find_runtime_socket():
     """
     import platform  # pylint: disable=import-outside-toplevel
     if platform.system() == "Darwin":
-        # Lima-based: socket is inside the VM, always /run/docker.sock
-        return "/run/docker.sock"
+        for candidate in [Path.home() / ".rd" / "docker.sock",
+                          Path.home() / ".docker" / "run" / "docker.sock",
+                          Path("/var/run/docker.sock")]:
+            if candidate.exists():
+                return str(candidate)
+        return None
     for candidate in SOCKET_CANDIDATES:
         if Path(candidate).exists():
             return candidate
