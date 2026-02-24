@@ -117,7 +117,8 @@ class State:  # pylint: disable=too-few-public-methods,too-many-instance-attribu
             self.compose = yaml.safe_load(f)
         self.project_name = self.compose.get("name", "default")
         self.namespace = self.project_name
-        self.services = self.compose.get("services", {})
+        all_services = self.compose.get("services") or {}
+        self.services = {k: v for k, v in all_services.items() if k != "h2c-api"}
         self.configmaps = self._load_file_resources(data_dir, "configmaps")
         self.secrets = self._load_file_resources(data_dir, "secrets")
         self.leases = {}  # in-memory: {name: lease_object}
@@ -300,12 +301,58 @@ def make_deployment(name, svc, namespace):
 ROUTES = []
 
 
+def _filter_by_label(items, qs):
+    """Filter items by labelSelector query param (basic key=value only)."""
+    selector = qs.get("labelSelector", [""])[0]
+    if not selector:
+        return items
+    required = {}
+    for part in selector.split(","):
+        if "=" in part:
+            k, v = part.split("=", 1)
+            required[k.strip()] = v.strip()
+    if not required:
+        return items
+    return [item for item in items
+            if all(item.get("metadata", {}).get("labels", {}).get(k) == v
+                   for k, v in required.items())]
+
+
+def _check_ns(match, state):
+    """Return True if the requested namespace matches the project namespace."""
+    return match.group("ns") == state.namespace
+
+
 def route(method, pattern):
     """Decorator: register a (method, regex) -> handler."""
     def decorator(func):
         ROUTES.append((method, re.compile(pattern), func))
         return func
     return decorator
+
+
+# --- Node (single fake node) ---
+
+_H2C_NODE = {
+    "apiVersion": "v1", "kind": "Node",
+    "metadata": {"name": "h2c-node", "labels": {
+        "kubernetes.io/hostname": "h2c-node",
+        "kubernetes.io/os": "linux",
+        "kubernetes.io/arch": "amd64",
+    }},
+    "status": {
+        "conditions": [{"type": "Ready", "status": "True"}],
+        "addresses": [
+            {"type": "Hostname", "address": "h2c-node"},
+            {"type": "InternalIP", "address": "127.0.0.1"},
+        ],
+        "nodeInfo": {
+            "kubeletVersion": "v1.28.0-h2c",
+            "operatingSystem": "linux",
+            "architecture": "amd64",
+        },
+    },
+}
 
 
 # --- Discovery (required for client-go / kubernetes-python to boot) ---
@@ -331,18 +378,20 @@ def handle_api(state, match, body, qs):
 @route("GET", r"/api/v1$")
 def handle_api_v1(state, match, body, qs):
     resources = [
+        {"name": "nodes", "namespaced": False, "kind": "Node",
+         "shortNames": ["no"], "verbs": ["get", "list"]},
         {"name": "namespaces", "namespaced": False, "kind": "Namespace",
-         "verbs": ["get", "list"]},
+         "shortNames": ["ns"], "verbs": ["get", "list"]},
         {"name": "pods", "namespaced": True, "kind": "Pod",
-         "verbs": ["get", "list"]},
+         "shortNames": ["po"], "verbs": ["get", "list"]},
         {"name": "pods/log", "namespaced": True, "kind": "Pod",
          "verbs": ["get"]},
         {"name": "services", "namespaced": True, "kind": "Service",
-         "verbs": ["get", "list"]},
+         "shortNames": ["svc"], "verbs": ["get", "list"]},
         {"name": "endpoints", "namespaced": True, "kind": "Endpoints",
-         "verbs": ["get", "list"]},
+         "shortNames": ["ep"], "verbs": ["get", "list"]},
         {"name": "configmaps", "namespaced": True, "kind": "ConfigMap",
-         "verbs": ["get", "list"]},
+         "shortNames": ["cm"], "verbs": ["get", "list"]},
         {"name": "secrets", "namespaced": True, "kind": "Secret",
          "verbs": ["get", "list"]},
     ]
@@ -372,7 +421,7 @@ def handle_apis(state, match, body, qs):
 def handle_apps_v1(state, match, body, qs):
     resources = [
         {"name": "deployments", "namespaced": True, "kind": "Deployment",
-         "verbs": ["get", "list", "patch", "update"]},
+         "shortNames": ["deploy"], "verbs": ["get", "list", "patch", "update"]},
     ]
     return 200, {"kind": "APIResourceList", "groupVersion": "apps/v1",
                  "resources": resources}
@@ -405,18 +454,34 @@ def handle_get_ns(state, match, body, qs):
     return 404, k8s_status(404, f"namespaces \"{ns}\" not found")
 
 
+# --- Core: nodes ---
+
+@route("GET", r"/api/v1/nodes$")
+def handle_list_nodes(state, match, body, qs):
+    return 200, k8s_list("NodeList", "v1", [_H2C_NODE])
+
+
+@route("GET", r"/api/v1/nodes/(?P<name>[^/]+)$")
+def handle_get_node(state, match, body, qs):
+    if match.group("name") == "h2c-node":
+        return 200, _H2C_NODE
+    return 404, k8s_status(404, f"nodes \"{match.group('name')}\" not found")
+
+
 # --- Core: pods ---
 
 @route("GET", r"/api/v1/namespaces/(?P<ns>[^/]+)/pods$")
 def handle_list_pods(state, match, body, qs):
+    if not _check_ns(match, state):
+        return 200, k8s_list("PodList", "v1", [])
     items = [make_pod(n, s, state.namespace) for n, s in state.services.items()]
-    return 200, k8s_list("PodList", "v1", items)
+    return 200, k8s_list("PodList", "v1", _filter_by_label(items, qs))
 
 
 @route("GET", r"/api/v1/namespaces/(?P<ns>[^/]+)/pods/(?P<name>[^/]+)$")
 def handle_get_pod(state, match, body, qs):
     name = match.group("name")
-    if name in state.services:
+    if _check_ns(match, state) and name in state.services:
         return 200, make_pod(name, state.services[name], state.namespace)
     return 404, k8s_status(404, f"pods \"{name}\" not found")
 
@@ -426,7 +491,7 @@ def handle_get_pod(state, match, body, qs):
 @route("GET", r"/api/v1/namespaces/(?P<ns>[^/]+)/pods/(?P<name>[^/]+)/log$")
 def handle_pod_log(state, match, body, qs):
     name = match.group("name")
-    if name not in state.services:
+    if not _check_ns(match, state) or name not in state.services:
         return 404, k8s_status(404, f"pods \"{name}\" not found")
     if not state.runtime.available:
         return 501, k8s_status(501, "runtime socket not mounted")
@@ -447,14 +512,16 @@ def handle_pod_log(state, match, body, qs):
 
 @route("GET", r"/api/v1/namespaces/(?P<ns>[^/]+)/services$")
 def handle_list_svc(state, match, body, qs):
+    if not _check_ns(match, state):
+        return 200, k8s_list("ServiceList", "v1", [])
     items = [make_service(n, s, state.namespace) for n, s in state.services.items()]
-    return 200, k8s_list("ServiceList", "v1", items)
+    return 200, k8s_list("ServiceList", "v1", _filter_by_label(items, qs))
 
 
 @route("GET", r"/api/v1/namespaces/(?P<ns>[^/]+)/services/(?P<name>[^/]+)$")
 def handle_get_svc(state, match, body, qs):
     name = match.group("name")
-    if name in state.services:
+    if _check_ns(match, state) and name in state.services:
         return 200, make_service(name, state.services[name], state.namespace)
     return 404, k8s_status(404, f"services \"{name}\" not found")
 
@@ -463,14 +530,26 @@ def handle_get_svc(state, match, body, qs):
 
 @route("GET", r"/api/v1/namespaces/(?P<ns>[^/]+)/endpoints$")
 def handle_list_ep(state, match, body, qs):
+    if not _check_ns(match, state):
+        return 200, k8s_list("EndpointsList", "v1", [])
     items = [make_endpoints(n, s, state.namespace) for n, s in state.services.items()]
-    return 200, k8s_list("EndpointsList", "v1", items)
+    return 200, k8s_list("EndpointsList", "v1", _filter_by_label(items, qs))
+
+
+@route("GET", r"/api/v1/namespaces/(?P<ns>[^/]+)/endpoints/(?P<name>[^/]+)$")
+def handle_get_ep(state, match, body, qs):
+    name = match.group("name")
+    if _check_ns(match, state) and name in state.services:
+        return 200, make_endpoints(name, state.services[name], state.namespace)
+    return 404, k8s_status(404, f"endpoints \"{name}\" not found")
 
 
 # --- Core: configmaps ---
 
 @route("GET", r"/api/v1/namespaces/(?P<ns>[^/]+)/configmaps$")
 def handle_list_cm(state, match, body, qs):
+    if not _check_ns(match, state):
+        return 200, k8s_list("ConfigMapList", "v1", [])
     items = [make_configmap(n, d, state.namespace) for n, d in state.configmaps.items()]
     return 200, k8s_list("ConfigMapList", "v1", items)
 
@@ -478,7 +557,7 @@ def handle_list_cm(state, match, body, qs):
 @route("GET", r"/api/v1/namespaces/(?P<ns>[^/]+)/configmaps/(?P<name>[^/]+)$")
 def handle_get_cm(state, match, body, qs):
     name = match.group("name")
-    if name in state.configmaps:
+    if _check_ns(match, state) and name in state.configmaps:
         return 200, make_configmap(name, state.configmaps[name], state.namespace)
     return 404, k8s_status(404, f"configmaps \"{name}\" not found")
 
@@ -487,6 +566,8 @@ def handle_get_cm(state, match, body, qs):
 
 @route("GET", r"/api/v1/namespaces/(?P<ns>[^/]+)/secrets$")
 def handle_list_secret(state, match, body, qs):
+    if not _check_ns(match, state):
+        return 200, k8s_list("SecretList", "v1", [])
     items = [make_secret(n, d, state.namespace) for n, d in state.secrets.items()]
     return 200, k8s_list("SecretList", "v1", items)
 
@@ -494,7 +575,7 @@ def handle_list_secret(state, match, body, qs):
 @route("GET", r"/api/v1/namespaces/(?P<ns>[^/]+)/secrets/(?P<name>[^/]+)$")
 def handle_get_secret(state, match, body, qs):
     name = match.group("name")
-    if name in state.secrets:
+    if _check_ns(match, state) and name in state.secrets:
         return 200, make_secret(name, state.secrets[name], state.namespace)
     return 404, k8s_status(404, f"secrets \"{name}\" not found")
 
@@ -503,14 +584,16 @@ def handle_get_secret(state, match, body, qs):
 
 @route("GET", r"/apis/apps/v1/namespaces/(?P<ns>[^/]+)/deployments$")
 def handle_list_deploy(state, match, body, qs):
+    if not _check_ns(match, state):
+        return 200, k8s_list("DeploymentList", "apps/v1", [])
     items = [make_deployment(n, s, state.namespace) for n, s in state.services.items()]
-    return 200, k8s_list("DeploymentList", "apps/v1", items)
+    return 200, k8s_list("DeploymentList", "apps/v1", _filter_by_label(items, qs))
 
 
 @route("GET", r"/apis/apps/v1/namespaces/(?P<ns>[^/]+)/deployments/(?P<name>[^/]+)$")
 def handle_get_deploy(state, match, body, qs):
     name = match.group("name")
-    if name in state.services:
+    if _check_ns(match, state) and name in state.services:
         return 200, make_deployment(name, state.services[name], state.namespace)
     return 404, k8s_status(404, f"deployments.apps \"{name}\" not found")
 
@@ -518,7 +601,7 @@ def handle_get_deploy(state, match, body, qs):
 @route("PATCH", r"/apis/apps/v1/namespaces/(?P<ns>[^/]+)/deployments/(?P<name>[^/]+)$")
 def handle_patch_deploy(state, match, body, qs):
     name = match.group("name")
-    if name not in state.services:
+    if not _check_ns(match, state) or name not in state.services:
         return 404, k8s_status(404, f"deployments.apps \"{name}\" not found")
     # Restart the actual container via runtime socket
     restarted = False
@@ -538,13 +621,15 @@ def handle_patch_deploy(state, match, body, qs):
 
 @route("GET", r"/apis/coordination\.k8s\.io/v1/namespaces/(?P<ns>[^/]+)/leases$")
 def handle_list_leases(state, match, body, qs):
+    if not _check_ns(match, state):
+        return 200, k8s_list("LeaseList", "coordination.k8s.io/v1", [])
     return 200, k8s_list("LeaseList", "coordination.k8s.io/v1", list(state.leases.values()))
 
 
 @route("GET", r"/apis/coordination\.k8s\.io/v1/namespaces/(?P<ns>[^/]+)/leases/(?P<name>[^/]+)$")
 def handle_get_lease(state, match, body, qs):
     name = match.group("name")
-    if name in state.leases:
+    if _check_ns(match, state) and name in state.leases:
         return 200, state.leases[name]
     return 404, k8s_status(404, f"leases.coordination.k8s.io \"{name}\" not found")
 
@@ -675,7 +760,7 @@ def main():
 
     server = HTTPServer(("0.0.0.0", port), Handler)
 
-    # TLS — serve HTTPS if certs are available (generated by h2c_inject.py)
+    # TLS — serve HTTPS if certs are available (generated by inject.py)
     sa_path = Path(os.environ.get("H2C_SA_DIR",
                                   "/var/run/secrets/kubernetes.io/serviceaccount"))
     cert_file = sa_path / "tls.crt"

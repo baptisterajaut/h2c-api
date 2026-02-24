@@ -19,16 +19,18 @@ Some applications query the Kubernetes API at runtime — leader election, servi
 
 ## How it works
 
-h2c-api is a 700-line Python script that impersonates a Kubernetes control plane convincingly enough that `client-go` — the same library that manages production clusters — trusts it completely. We are not proud. We are shipping.
+h2c-api is an 800-line Python script that impersonates a Kubernetes control plane convincingly enough that `client-go` — the same library that manages production clusters — trusts it completely. We are not proud. We are shipping.
 
 Two files:
 
 | File | Runs on | Does what |
 |------|---------|-----------|
-| `h2c_inject.py` | Host | Reads `compose.yml`, generates self-signed certs + dummy SA token, writes `compose.override.yml` + kubeconfig |
+| `inject.py` | Host | Generates self-signed certs + dummy SA token. **Standalone**: writes `compose.override.yml` + kubeconfig. **h2c transform**: injects directly into compose services. |
 | `h2c_api.py` | Container | Serves a fake k8s API (HTTPS, port 6443) from the compose data |
 
-Docker Compose automatically merges `compose.yml` + `compose.override.yml`. Every service gets:
+No pre-built Docker image — the generated service uses `python:3-alpine`, installs pyyaml, pulls `h2c_api.py` from `main`, and runs it. Always up to date, nothing to publish, nothing to maintain. The container starts in a few seconds and weighs nothing on your conscience (the rest of the project handles that).
+
+Every service gets:
 - A fake ServiceAccount mount at `/var/run/secrets/kubernetes.io/serviceaccount/`
 - `KUBERNETES_SERVICE_HOST=h2c-api` and `KUBERNETES_SERVICE_PORT=6443`
 
@@ -36,11 +38,41 @@ Client libraries see valid TLS, a real CA cert, and a real token file. They don'
 
 ## Usage
 
+### As an h2c transform (recommended)
+
+Install via h2c-manager and add config to `helmfile2compose.yaml`:
+
+```bash
+python3 h2c-manager.py install fake-apiserver
+```
+
+```yaml
+# helmfile2compose.yaml
+h2c-api:
+  hosts: [myapp.local]           # extra SAN hostnames (optional)
+  expose-host-port: 6443         # expose on host + generate kubeconfig (optional)
+```
+
+### Options (transform)
+
+The `h2c-api:` key in `helmfile2compose.yaml` accepts:
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `hosts` | `[]` | Extra SAN hostnames added to the TLS cert (list) |
+| `expose-host-port` | — | Expose on host at this port and generate kubeconfig. Omit to keep internal only. |
+
+When `expose-host-port` is set, a kubeconfig file is written to the output directory. The first entry in `hosts` is used as the server address; if `hosts` is empty, defaults to `localhost`.
+
+Then run h2c with `--extensions-dir` as usual. h2c-api appears in `compose.yml` alongside your services — no override file, no extra step.
+
+### Standalone CLI
+
 ```bash
 # 1. You have a compose.yml (from helmfile2compose, or hand-written, or stolen in Irak, whatever)
 
 # 2. Inject the fake API (with host access)
-python3 h2c_inject.py compose.yml --expose-host-port
+python3 inject.py compose.yml --expose-host-port
 
 # 3. Done
 docker compose up -d
@@ -49,22 +81,22 @@ docker compose up -d
 KUBECONFIG=kubeconfig-localhost.conf kubectl get pods
 ```
 
-### Options
+### Options (standalone)
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--expose-host-port [N]` | `6443` | Expose on host and generate kubeconfig. Port is optional. |
 | `--host HOSTNAME` | `localhost` | Hostname in TLS cert SAN and kubeconfig (repeatable) |
 
-`--expose-host-port` is the master switch for host access. Without it, `--host` only adds SANs to the TLS cert but nothing is exposed. With it, h2c-inject exposes the port and generates a self-contained kubeconfig:
+`--expose-host-port` is the master switch for host access. Without it, `--host` only adds SANs to the TLS cert but nothing is exposed. With it, inject exposes the port and generates a self-contained kubeconfig:
 
 ```bash
 # Local access (default: localhost:6443)
-python3 h2c_inject.py compose.yml --expose-host-port
+python3 inject.py compose.yml --expose-host-port
 # -> kubeconfig-localhost.conf
 
 # Remote access with custom port
-python3 h2c_inject.py compose.yml --expose-host-port 16443 --host myserver.example.com
+python3 inject.py compose.yml --expose-host-port 16443 --host myserver.example.com
 # -> kubeconfig-myserver.example.com.conf
 ```
 
@@ -78,10 +110,11 @@ Exposing this on a real server is the international law equivalent of handing ou
 |----------|-------|--------|
 | `/version` | GET | Static |
 | `/api`, `/apis`, `/api/v1` | GET | Static (discovery) |
+| Nodes | GET, LIST | Static (single fake node) |
 | Namespaces | GET, LIST | Project name |
 | Pods | GET, LIST | Compose services |
 | Services | GET, LIST | Compose services |
-| Endpoints | LIST | Compose services + ports |
+| Endpoints | GET, LIST | Compose services + ports |
 | ConfigMaps | GET, LIST | `configmaps/` directory |
 | Secrets | GET, LIST | `secrets/` directory |
 | Deployments | GET, LIST, PATCH | Compose services |
@@ -89,7 +122,9 @@ Exposing this on a real server is the international law equivalent of handing ou
 | Pod logs | GET | Runtime socket* |
 | Everything else | — | 501 Not Implemented |
 
-\* **Logs and restart** require the container runtime socket (`/var/run/docker.sock`). On macOS with Lima-based runtimes (Rancher Desktop, colima), the socket cannot be reliably bind-mounted from the host. These features are untested and degrade gracefully to 501 when the socket is unavailable.
+LIST operations support `?labelSelector=key=value` filtering. Namespace-scoped endpoints return empty results for unknown namespaces — the h2c-api service itself is excluded from all resource lists (it's infrastructure, not a workload).
+
+\* **Logs and restart** require the Docker socket. `inject.py` probes each candidate socket with an actual container mount test — if the mount fails (e.g. Lima VMs on macOS, where host Unix sockets can't traverse the filesystem bridge), the socket is silently skipped. No socket = no logs/restart, but everything else works. When available (Docker Desktop, moby backend), `kubectl logs` returns real container output and `kubectl rollout restart` restarts the actual container via the Docker API.
 
 Watch (`?watch=true`) is explicitly unsupported and returns 501. This is where we draw the line. The line is arbitrary but it exists.
 
@@ -110,14 +145,35 @@ Environment variables for the container:
 
 ## Requirements
 
-- **h2c_inject.py** (host): Python 3, PyYAML, `openssl` CLI
-- **h2c_api.py** (container): Python 3, PyYAML (included in image)
+- **inject.py** (host): Python 3, `cryptography`, PyYAML (standalone mode only)
+- **h2c_api.py** (container): pulled at startup into `python:3-alpine`, pyyaml installed on the fly
+- Internet access at container startup (GitHub raw content)
 - Contempt for the sacred or for anything good in this world.
 
+## Docker socket access
+
+> He who grants the vessel passage to the keeper's threshold invites the keeper into his own dwelling. The vessel may then read all scrolls within the household — or command the household to reshape itself. There is no ward against a guest who holds the host's own key.
+>
+> — *Necronomicon*, *De la délégation des clefs domestiques* (not recommended)
+
+The h2c-api container mounts the Docker socket to support `kubectl logs` and `kubectl rollout restart`. `inject.py` tests each socket candidate by attempting an actual bind mount in a throwaway container — if the mount fails, the socket is excluded from the generated compose. This means the container can see and control all other containers on the host. This is fine for local development. This is catastrophic for anything else. You have been warned, in the only language this project respects.
+
+**containerd note:** `kubectl logs` and `kubectl rollout restart` use the Docker HTTP API over the socket. containerd exposes a gRPC API instead — incompatible. If your runtime is containerd-only (nerdctl without moby), the socket won't be found and these features degrade to 501. Everything else (pods, services, leader election, service discovery) works regardless.
+
+## Code quality
+
+Criminal, yes — but that doesn't mean the code has to be terrible. Just what it does.
+
+| Metric | `inject.py` | `h2c_api.py` |
+|--------|-------------|--------------|
+| pylint | 9.69/10 | 10.00/10 |
+| pyflakes | clean | clean |
+| radon MI (avg) | A (50.20) | A (22.12) |
+| radon CC (avg) | B (5.1) | A (2.59) |
 
 ## Relationship with helmfile2compose
 
-None. h2c-api is definitely a separate project that happens to read the same YAML format. helmfile2compose doesn't know this exists and bears no responsibility for what happens here. Any resemblance to a functioning Kubernetes cluster is purely coincidental and should not be presented as evidence.
+Complicated. h2c-api is a separate project on a personal account — plausible deniability. It can be used as a standalone CLI (no h2c required) or as an h2c transform extension (registered in h2c-manager's registry under `baptisterajaut/h2c-api`, not the org). helmfile2compose bears no responsibility for what happens here. Any resemblance to a functioning Kubernetes cluster is purely coincidental and should not be presented as evidence.
 
 ## Acknowledgments
 
