@@ -43,7 +43,7 @@ Client libraries see valid TLS, a real CA cert, and a real token file. They don'
 Install via h2c-manager and add config to `helmfile2compose.yaml`:
 
 ```bash
-python3 h2c-manager.py install fake-apiserver
+python3 h2c-manager.py fake-apiserver
 ```
 
 ```yaml
