@@ -1,17 +1,17 @@
-# h2c-api
+# dekube-fakeapi
 
-Fake Kubernetes API server backed by compose.yml. Separate project from helmfile2compose — h2c doesn't know this exists. Plausible deniability.
+Fake Kubernetes API server backed by compose.yml. Separate project from dekube — dekube doesn't know this exists. Plausible deniability.
 
 ## What it is
 
-A Python HTTP(S) server that reads a docker-compose.yml (produced by h2c or anyone) and responds to Kubernetes API requests with plausible fake data. Apps running in compose that use client-go / kubernetes-python get working responses instead of connection refused.
+A Python HTTP(S) server that reads a docker-compose.yml (produced by dekube or anyone) and responds to Kubernetes API requests with plausible fake data. Apps running in compose that use client-go / kubernetes-python get working responses instead of connection refused.
 
 ## Architecture
 
 Two files, two roles:
 
 - **`h2c_api.py`** — the fake apiserver. Runs inside a container. Reads `/data/compose.yml` + `/data/configmaps/` + `/data/secrets/`. Serves HTTPS on port 6443 if certs are present, HTTP otherwise.
-- **`inject.py`** — dual-mode: standalone CLI (generates `compose.override.yml`) or h2c transform extension (injects directly into `compose_services`). Generates self-signed certs via `cryptography`, dummy SA token, and env vars for every service.
+- **`inject.py`** — dual-mode: standalone CLI (generates `compose.override.yml`) or dekube transform extension (injects directly into `compose_services`). Generates self-signed certs via `cryptography`, dummy SA token, and env vars for every service.
 
 They share zero code. The only shared contract is "compose.yml is YAML".
 
@@ -35,7 +35,7 @@ pylint h2c_api.py inject.py
 pyflakes h2c_api.py inject.py
 
 # Test end-to-end
-# 1. Have a compose.yml (from h2c or hand-written)
+# 1. Have a compose.yml (from dekube or hand-written)
 # 2. python3 inject.py compose.yml
 # 3. docker compose up -d
 # 4. docker exec <container> kubectl get pods
@@ -60,7 +60,7 @@ No Docker image to build or publish. The generated compose service uses `python:
 
 - `h2c_api.py`: pyyaml (installed at container startup)
 - `inject.py`: cryptography + pyyaml (host, pyyaml only for standalone CLI mode — deferred import)
-- No shared dependencies with h2c
+- No shared dependencies with dekube
 
 ## The Hague status
 

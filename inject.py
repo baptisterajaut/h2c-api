@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Inject h2c-api into a compose stack.
+"""Inject dekube-fakeapi into a compose stack.
 
 Dual-mode:
-  - **Transform** — loaded by h2c as an extension, injects directly into
+  - **Transform** — loaded by dekube as an extension, injects directly into
     compose_services. No override file, no manual step.
   - **Standalone CLI** — generates compose.override.yml + h2c-sa/ certs.
     Same behavior as the original h2c_inject.py.
@@ -24,7 +24,7 @@ SA_DIR = "h2c-sa"
 SA_MOUNT = "/var/run/secrets/kubernetes.io/serviceaccount"
 H2C_API_IMAGE = "python:3-alpine"
 H2C_API_URL = ("https://raw.githubusercontent.com"
-               "/baptisterajaut/h2c-api/main/h2c_api.py")
+               "/baptisterajaut/dekube-fakeapi/main/h2c_api.py")
 SOCKET_CANDIDATES = [
     "/run/docker.sock",         # Linux / Lima VM internal
     "/var/run/docker.sock",     # Linux / Docker Desktop

@@ -1,4 +1,4 @@
-# h2c-api - Fake Kubernetes API server, real warcrimes
+# dekube-fakeapi - Fake Kubernetes API server, real warcrimes
 
 ![Python](https://img.shields.io/badge/python-3-blue)
 ![License](https://img.shields.io/badge/license-why-lightgrey)
@@ -38,16 +38,16 @@ Client libraries see valid TLS, a real CA cert, and a real token file. They don'
 
 ## Usage
 
-### As an h2c transform (recommended)
+### As a dekube transform (recommended)
 
-Install via h2c-manager and add config to `helmfile2compose.yaml`:
+Install via dekube-manager and add config to `dekube.yaml`:
 
 ```bash
-python3 h2c-manager.py fake-apiserver
+python3 dekube-manager.py fake-apiserver
 ```
 
 ```yaml
-# helmfile2compose.yaml
+# dekube.yaml
 h2c-api:
   hosts: [myapp.local]           # extra SAN hostnames (optional)
   expose-host-port: 6443         # expose on host + generate kubeconfig (optional)
@@ -55,7 +55,7 @@ h2c-api:
 
 ### Options (transform)
 
-The `h2c-api:` key in `helmfile2compose.yaml` accepts:
+The `h2c-api:` key in `dekube.yaml` accepts:
 
 | Key | Default | Description |
 |-----|---------|-------------|
@@ -64,7 +64,7 @@ The `h2c-api:` key in `helmfile2compose.yaml` accepts:
 
 When `expose-host-port` is set, a kubeconfig file is written to the output directory. The first entry in `hosts` is used as the server address; if `hosts` is empty, defaults to `localhost`.
 
-Then run h2c with `--extensions-dir` as usual. h2c-api appears in `compose.yml` alongside your services — no override file, no extra step.
+Then run dekube with `--extensions-dir` as usual. h2c-api appears in `compose.yml` alongside your services — no override file, no extra step.
 
 ### Standalone CLI
 
@@ -171,9 +171,9 @@ Criminal, yes — but that doesn't mean the code has to be terrible. Just what i
 | radon MI (avg) | A (50.20) | A (22.12) |
 | radon CC (avg) | B (5.1) | A (2.59) |
 
-## Relationship with helmfile2compose
+## Relationship with dekube
 
-Complicated. h2c-api is a separate project on a personal account — plausible deniability. It can be used as a standalone CLI (no h2c required) or as an h2c transform extension (registered in h2c-manager's registry under `baptisterajaut/h2c-api`, not the org). helmfile2compose bears no responsibility for what happens here. Any resemblance to a functioning Kubernetes cluster is purely coincidental and should not be presented as evidence.
+Complicated. dekube-fakeapi is a separate project on a personal account — plausible deniability. It can be used as a standalone CLI (no dekube required) or as a dekube transform extension (registered in dekube-manager's registry under `baptisterajaut/dekube-fakeapi`, not the org). dekube bears no responsibility for what happens here. Any resemblance to a functioning Kubernetes cluster is purely coincidental and should not be presented as evidence.
 
 ## Acknowledgments
 
