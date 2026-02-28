@@ -10,7 +10,7 @@ A Python HTTP(S) server that reads a docker-compose.yml (produced by dekube or a
 
 Two files, two roles:
 
-- **`h2c_api.py`** — the fake apiserver. Runs inside a container. Reads `/data/compose.yml` + `/data/configmaps/` + `/data/secrets/`. Serves HTTPS on port 6443 if certs are present, HTTP otherwise.
+- **`dekube_api.py`** — the fake apiserver. Runs inside a container. Reads `/data/compose.yml` + `/data/configmaps/` + `/data/secrets/`. Serves HTTPS on port 6443 if certs are present, HTTP otherwise.
 - **`inject.py`** — dual-mode: standalone CLI (generates `compose.override.yml`) or dekube transform extension (injects directly into `compose_services`). Generates self-signed certs via `cryptography`, dummy SA token, and env vars for every service.
 
 They share zero code. The only shared contract is "compose.yml is YAML".
@@ -23,7 +23,7 @@ They share zero code. The only shared contract is "compose.yml is YAML".
 
 **Leases (read-write, in-memory):** create, get, update, delete. Leader election stub — single replica = always the leader.
 
-**Filtering:** LIST operations support `?labelSelector=key=value`. Namespace-scoped endpoints only return resources for the project namespace — other namespaces return empty lists. The h2c-api service itself is excluded from all resource lists.
+**Filtering:** LIST operations support `?labelSelector=key=value`. Namespace-scoped endpoints only return resources for the project namespace — other namespaces return empty lists. The dekube-api service itself is excluded from all resource lists.
 
 **Everything else:** 501 Not Implemented. Watch (`?watch=true`) explicitly rejected.
 
@@ -31,8 +31,8 @@ They share zero code. The only shared contract is "compose.yml is YAML".
 
 ```bash
 # Lint
-pylint h2c_api.py inject.py
-pyflakes h2c_api.py inject.py
+pylint dekube_api.py inject.py
+pyflakes dekube_api.py inject.py
 
 # Test end-to-end
 # 1. Have a compose.yml (from dekube or hand-written)
@@ -47,18 +47,18 @@ All via environment variables (in the container):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `H2C_COMPOSE` | `/data/compose.yml` | Path to compose file |
-| `H2C_DATA_DIR` | `/data` | Base dir for configmaps/ and secrets/ |
-| `H2C_PORT` | `6443` | Listen port |
-| `H2C_SA_DIR` | `/var/run/secrets/kubernetes.io/serviceaccount` | Path to TLS cert + key |
+| `DEKUBE_COMPOSE` | `/data/compose.yml` | Path to compose file |
+| `DEKUBE_DATA_DIR` | `/data` | Base dir for configmaps/ and secrets/ |
+| `DEKUBE_PORT` | `6443` | Listen port |
+| `DEKUBE_SA_DIR` | `/var/run/secrets/kubernetes.io/serviceaccount` | Path to TLS cert + key |
 
 ## Runtime
 
-No Docker image to build or publish. The generated compose service uses `python:3-alpine`, installs pyyaml, pulls `h2c_api.py` from main at startup.
+No Docker image to build or publish. The generated compose service uses `python:3-alpine`, installs pyyaml, pulls `dekube_api.py` from main at startup.
 
 ## Dependencies
 
-- `h2c_api.py`: pyyaml (installed at container startup)
+- `dekube_api.py`: pyyaml (installed at container startup)
 - `inject.py`: cryptography + pyyaml (host, pyyaml only for standalone CLI mode — deferred import)
 - No shared dependencies with dekube
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""h2c-api: fake Kubernetes API server. You should not be reading this.
+"""dekube-api: fake Kubernetes API server. You should not be reading this.
 
 If you are reading this, something has gone wrong — either in your
 infrastructure, or in your life choices. This file impersonates a
@@ -61,7 +61,7 @@ class RuntimeClient:
             conn.close()
             return resp.status, data
         except (ConnectionRefusedError, OSError) as exc:
-            print(f"[h2c-api] runtime socket error: {exc}", file=sys.stderr)
+            print(f"[dekube-api] runtime socket error: {exc}", file=sys.stderr)
             return 0, b""
 
     def find_container(self, project, service):
@@ -118,7 +118,7 @@ class State:  # pylint: disable=too-few-public-methods,too-many-instance-attribu
         self.project_name = self.compose.get("name", "default")
         self.namespace = self.project_name
         all_services = self.compose.get("services") or {}
-        self.services = {k: v for k, v in all_services.items() if k != "h2c-api"}
+        self.services = {k: v for k, v in all_services.items() if k != "dekube-api"}
         self.configmaps = self._load_file_resources(data_dir, "configmaps")
         self.secrets = self._load_file_resources(data_dir, "secrets")
         self.leases = {}  # in-memory: {name: lease_object}
@@ -194,7 +194,7 @@ def make_pod(name, svc, namespace):
                 "image": svc.get("image", "unknown"),
                 "ports": [{"containerPort": p} for p in _extract_ports(svc)],
             }],
-            "nodeName": "h2c-node",
+            "nodeName": "dekube-node",
         },
         "status": {
             "phase": "Running",
@@ -333,21 +333,21 @@ def route(method, pattern):
 
 # --- Node (single fake node) ---
 
-_H2C_NODE = {
+_DEKUBE_NODE = {
     "apiVersion": "v1", "kind": "Node",
-    "metadata": {"name": "h2c-node", "labels": {
-        "kubernetes.io/hostname": "h2c-node",
+    "metadata": {"name": "dekube-node", "labels": {
+        "kubernetes.io/hostname": "dekube-node",
         "kubernetes.io/os": "linux",
         "kubernetes.io/arch": "amd64",
     }},
     "status": {
         "conditions": [{"type": "Ready", "status": "True"}],
         "addresses": [
-            {"type": "Hostname", "address": "h2c-node"},
+            {"type": "Hostname", "address": "dekube-node"},
             {"type": "InternalIP", "address": "127.0.0.1"},
         ],
         "nodeInfo": {
-            "kubeletVersion": "v1.28.0-h2c",
+            "kubeletVersion": "v1.28.0-dekube",
             "operatingSystem": "linux",
             "architecture": "amd64",
         },
@@ -361,7 +361,7 @@ _H2C_NODE = {
 def handle_version(state, match, body, qs):
     return 200, {
         "major": "1", "minor": "28",
-        "gitVersion": "v1.28.0-h2c", "platform": "linux/amd64",
+        "gitVersion": "v1.28.0-dekube", "platform": "linux/amd64",
     }
 
 
@@ -370,7 +370,7 @@ def handle_api(state, match, body, qs):
     return 200, {
         "kind": "APIVersions", "versions": ["v1"],
         "serverAddressByClientCIDRs": [
-            {"clientCIDR": "0.0.0.0/0", "serverAddress": "h2c-api:6443"},
+            {"clientCIDR": "0.0.0.0/0", "serverAddress": "dekube-api:6443"},
         ],
     }
 
@@ -458,13 +458,13 @@ def handle_get_ns(state, match, body, qs):
 
 @route("GET", r"/api/v1/nodes$")
 def handle_list_nodes(state, match, body, qs):
-    return 200, k8s_list("NodeList", "v1", [_H2C_NODE])
+    return 200, k8s_list("NodeList", "v1", [_DEKUBE_NODE])
 
 
 @route("GET", r"/api/v1/nodes/(?P<name>[^/]+)$")
 def handle_get_node(state, match, body, qs):
-    if match.group("name") == "h2c-node":
-        return 200, _H2C_NODE
+    if match.group("name") == "dekube-node":
+        return 200, _DEKUBE_NODE
     return 404, k8s_status(404, f"nodes \"{match.group('name')}\" not found")
 
 
@@ -613,7 +613,7 @@ def handle_patch_deploy(state, match, body, qs):
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     deploy["metadata"]["annotations"]["kubectl.kubernetes.io/restartedAt"] = now
     if not restarted:
-        print(f"[h2c-api] WARN: could not restart container for {name}", file=sys.stderr)
+        print(f"[dekube-api] WARN: could not restart container for {name}", file=sys.stderr)
     return 200, deploy
 
 
@@ -697,7 +697,7 @@ class Handler(BaseHTTPRequestHandler):
 
         # Watch = not supported
         if qs.get("watch", [""])[0].lower() == "true":
-            self._respond(501, k8s_status(501, "watch not supported by h2c-api"))
+            self._respond(501, k8s_status(501, "watch not supported by dekube-api"))
             return
 
         # Match route
@@ -730,7 +730,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, _fmt, *args):  # pylint: disable=arguments-differ
         msg = args[1] if len(args) > 1 else args[0]
-        sys.stderr.write(f"[h2c-api] {self.requestline} -> {msg}\n")
+        sys.stderr.write(f"[dekube-api] {self.requestline} -> {msg}\n")
 
 
 # ---------------------------------------------------------------------------
@@ -738,10 +738,10 @@ class Handler(BaseHTTPRequestHandler):
 # ---------------------------------------------------------------------------
 
 def main():
-    compose_path = os.environ.get("H2C_COMPOSE", "/data/compose.yml")
-    data_dir = os.environ.get("H2C_DATA_DIR", "/data")
-    port = int(os.environ.get("H2C_PORT", "6443"))
-    runtime_socket = os.environ.get("H2C_RUNTIME_SOCKET", "/var/run/docker.sock")
+    compose_path = os.environ.get("DEKUBE_COMPOSE", "/data/compose.yml")
+    data_dir = os.environ.get("DEKUBE_DATA_DIR", "/data")
+    port = int(os.environ.get("DEKUBE_PORT", "6443"))
+    runtime_socket = os.environ.get("DEKUBE_RUNTIME_SOCKET", "/var/run/docker.sock")
 
     if not Path(compose_path).exists():
         print(f"Error: {compose_path} not found", file=sys.stderr)
@@ -750,7 +750,7 @@ def main():
     state = State(compose_path, data_dir, runtime_socket)
     Handler.state = state
 
-    print(f"h2c-api serving on :{port}", file=sys.stderr)
+    print(f"dekube-api serving on :{port}", file=sys.stderr)
     print(f"  project:    {state.project_name}", file=sys.stderr)
     print(f"  services:   {len(state.services)}", file=sys.stderr)
     print(f"  configmaps: {len(state.configmaps)}", file=sys.stderr)
@@ -761,7 +761,7 @@ def main():
     server = HTTPServer(("0.0.0.0", port), Handler)
 
     # TLS — serve HTTPS if certs are available (generated by inject.py)
-    sa_path = Path(os.environ.get("H2C_SA_DIR",
+    sa_path = Path(os.environ.get("DEKUBE_SA_DIR",
                                   "/var/run/secrets/kubernetes.io/serviceaccount"))
     cert_file = sa_path / "tls.crt"
     key_file = sa_path / "tls.key"

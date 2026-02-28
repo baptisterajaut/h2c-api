@@ -19,20 +19,20 @@ Some applications query the Kubernetes API at runtime — leader election, servi
 
 ## How it works
 
-h2c-api is an 800-line Python script that impersonates a Kubernetes control plane convincingly enough that `client-go` — the same library that manages production clusters — trusts it completely. We are not proud. We are shipping.
+dekube-api is an 800-line Python script that impersonates a Kubernetes control plane convincingly enough that `client-go` — the same library that manages production clusters — trusts it completely. We are not proud. We are shipping.
 
 Two files:
 
 | File | Runs on | Does what |
 |------|---------|-----------|
-| `inject.py` | Host | Generates self-signed certs + dummy SA token. **Standalone**: writes `compose.override.yml` + kubeconfig. **h2c transform**: injects directly into compose services. |
-| `h2c_api.py` | Container | Serves a fake k8s API (HTTPS, port 6443) from the compose data |
+| `inject.py` | Host | Generates self-signed certs + dummy SA token. **Standalone**: writes `compose.override.yml` + kubeconfig. **dekube transform**: injects directly into compose services. |
+| `dekube_api.py` | Container | Serves a fake k8s API (HTTPS, port 6443) from the compose data |
 
-No pre-built Docker image — the generated service uses `python:3-alpine`, installs pyyaml, pulls `h2c_api.py` from `main`, and runs it. Always up to date, nothing to publish, nothing to maintain. The container starts in a few seconds and weighs nothing on your conscience (the rest of the project handles that).
+No pre-built Docker image — the generated service uses `python:3-alpine`, installs pyyaml, pulls `dekube_api.py` from `main`, and runs it. Always up to date, nothing to publish, nothing to maintain. The container starts in a few seconds and weighs nothing on your conscience (the rest of the project handles that).
 
 Every service gets:
 - A fake ServiceAccount mount at `/var/run/secrets/kubernetes.io/serviceaccount/`
-- `KUBERNETES_SERVICE_HOST=h2c-api` and `KUBERNETES_SERVICE_PORT=6443`
+- `KUBERNETES_SERVICE_HOST=dekube-api` and `KUBERNETES_SERVICE_PORT=6443`
 
 Client libraries see valid TLS, a real CA cert, and a real token file. They don't ask questions. Neither should you.
 
@@ -48,14 +48,14 @@ python3 dekube-manager.py fake-apiserver
 
 ```yaml
 # dekube.yaml
-h2c-api:
+dekube-api:
   hosts: [myapp.local]           # extra SAN hostnames (optional)
   expose-host-port: 6443         # expose on host + generate kubeconfig (optional)
 ```
 
 ### Options (transform)
 
-The `h2c-api:` key in `dekube.yaml` accepts:
+The `dekube-api:` key in `dekube.yaml` accepts:
 
 | Key | Default | Description |
 |-----|---------|-------------|
@@ -64,7 +64,7 @@ The `h2c-api:` key in `dekube.yaml` accepts:
 
 When `expose-host-port` is set, a kubeconfig file is written to the output directory. The first entry in `hosts` is used as the server address; if `hosts` is empty, defaults to `localhost`.
 
-Then run dekube with `--extensions-dir` as usual. h2c-api appears in `compose.yml` alongside your services — no override file, no extra step.
+Then run dekube with `--extensions-dir` as usual. dekube-api appears in `compose.yml` alongside your services — no override file, no extra step.
 
 ### Standalone CLI
 
@@ -100,7 +100,7 @@ python3 inject.py compose.yml --expose-host-port 16443 --host myserver.example.c
 # -> kubeconfig-myserver.example.com.conf
 ```
 
-`kubectl version` will report `Server Version: v1.28.0-h2c`. If this doesn't raise alarms, the deception is complete.
+`kubectl version` will report `Server Version: v1.28.0-dekube`. If this doesn't raise alarms, the deception is complete.
 
 Exposing this on a real server is the international law equivalent of handing out loaded weapons at a school fair. The TLS cert is self-signed, the token is a string literal, and there is no authentication. For the record, we only provided the kubeconfig — we had no knowledge of the user's intentions and assume all usage is for legitimate, peaceful purposes. We accept no liability, and neither will your lawyer.
 
@@ -122,7 +122,7 @@ Exposing this on a real server is the international law equivalent of handing ou
 | Pod logs | GET | Runtime socket* |
 | Everything else | — | 501 Not Implemented |
 
-LIST operations support `?labelSelector=key=value` filtering. Namespace-scoped endpoints return empty results for unknown namespaces — the h2c-api service itself is excluded from all resource lists (it's infrastructure, not a workload).
+LIST operations support `?labelSelector=key=value` filtering. Namespace-scoped endpoints return empty results for unknown namespaces — the dekube-api service itself is excluded from all resource lists (it's infrastructure, not a workload).
 
 \* **Logs and restart** require the Docker socket. `inject.py` probes each candidate socket with an actual container mount test — if the mount fails (e.g. Lima VMs on macOS, where host Unix sockets can't traverse the filesystem bridge), the socket is silently skipped. No socket = no logs/restart, but everything else works. When available (Docker Desktop, moby backend), `kubectl logs` returns real container output and `kubectl rollout restart` restarts the actual container via the Docker API.
 
@@ -138,15 +138,15 @@ Environment variables for the container:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `H2C_COMPOSE` | `/data/compose.yml` | Compose file path |
-| `H2C_DATA_DIR` | `/data` | Base dir for `configmaps/` and `secrets/` |
-| `H2C_PORT` | `6443` | Listen port |
-| `H2C_SA_DIR` | `/var/run/secrets/kubernetes.io/serviceaccount` | TLS cert/key path |
+| `DEKUBE_COMPOSE` | `/data/compose.yml` | Compose file path |
+| `DEKUBE_DATA_DIR` | `/data` | Base dir for `configmaps/` and `secrets/` |
+| `DEKUBE_PORT` | `6443` | Listen port |
+| `DEKUBE_SA_DIR` | `/var/run/secrets/kubernetes.io/serviceaccount` | TLS cert/key path |
 
 ## Requirements
 
 - **inject.py** (host): Python 3, `cryptography`, PyYAML (standalone mode only)
-- **h2c_api.py** (container): pulled at startup into `python:3-alpine`, pyyaml installed on the fly
+- **dekube_api.py** (container): pulled at startup into `python:3-alpine`, pyyaml installed on the fly
 - Internet access at container startup (GitHub raw content)
 - Contempt for the sacred or for anything good in this world.
 
@@ -156,7 +156,7 @@ Environment variables for the container:
 >
 > — *Necronomicon*, *De la délégation des clefs domestiques* (not recommended)
 
-The h2c-api container mounts the Docker socket to support `kubectl logs` and `kubectl rollout restart`. `inject.py` tests each socket candidate by attempting an actual bind mount in a throwaway container — if the mount fails, the socket is excluded from the generated compose. This means the container can see and control all other containers on the host. This is fine for local development. This is catastrophic for anything else. You have been warned, in the only language this project respects.
+The dekube-api container mounts the Docker socket to support `kubectl logs` and `kubectl rollout restart`. `inject.py` tests each socket candidate by attempting an actual bind mount in a throwaway container — if the mount fails, the socket is excluded from the generated compose. This means the container can see and control all other containers on the host. This is fine for local development. This is catastrophic for anything else. You have been warned, in the only language this project respects.
 
 **containerd note:** `kubectl logs` and `kubectl rollout restart` use the Docker HTTP API over the socket. containerd exposes a gRPC API instead — incompatible. If your runtime is containerd-only (nerdctl without moby), the socket won't be found and these features degrade to 501. Everything else (pods, services, leader election, service discovery) works regardless.
 
@@ -164,7 +164,7 @@ The h2c-api container mounts the Docker socket to support `kubectl logs` and `ku
 
 Criminal, yes — but that doesn't mean the code has to be terrible. Just what it does.
 
-| Metric | `inject.py` | `h2c_api.py` |
+| Metric | `inject.py` | `dekube_api.py` |
 |--------|-------------|--------------|
 | pylint | 9.69/10 | 10.00/10 |
 | pyflakes | clean | clean |
